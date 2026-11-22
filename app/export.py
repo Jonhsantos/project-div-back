@@ -1,5 +1,7 @@
 from decimal import Decimal
+from datetime import timezone
 from io import BytesIO
+from zoneinfo import ZoneInfo
 from xml.sax.saxutils import escape
 import warnings
 import re
@@ -44,6 +46,10 @@ def generate_expense_pdf(trip, leader, participants, rows):
     styles["BodyText"].wordWrap = "CJK"
     report = BytesIO()
     end_date = trip.data_fim.strftime('%d/%m/%Y') if trip.data_fim else "Não informada"
+    closed_at = trip.encerrada_em
+    if closed_at and closed_at.tzinfo is None:
+        closed_at = closed_at.replace(tzinfo=timezone.utc)
+    closed_date = closed_at.astimezone(ZoneInfo("America/Sao_Paulo")).strftime('%d/%m/%Y') if closed_at else "Não registrada"
     created_at = trip.criado_em.strftime('%d/%m/%Y %H:%M %z').strip()
     story = [
         Paragraph("Relatório da viagem e despesas", styles["Title"]), Spacer(1, 14),
@@ -51,7 +57,9 @@ def generate_expense_pdf(trip, leader, participants, rows):
         Paragraph(f"Identificação: #{trip.id_viagem}", styles["BodyText"]),
         Paragraph(f"Título: {escape(trip.titulo)}", styles["BodyText"]),
         Paragraph(f"Destino: {escape(trip.destino)}", styles["BodyText"]),
-        Paragraph(f"Início: {trip.data_inicio.strftime('%d/%m/%Y')} · Término: {end_date}", styles["BodyText"]),
+        Paragraph(f"Data de início: {trip.data_inicio.strftime('%d/%m/%Y')}", styles["BodyText"]),
+        Paragraph(f"Data prevista de término: {end_date}", styles["BodyText"]),
+        Paragraph(f"Data de encerramento: {closed_date}", styles["BodyText"]),
         Paragraph(f"Descrição: {escape(trip.descricao or 'Não informada')}", styles["BodyText"]),
         Paragraph(f"Líder: {escape(leader.nome)}", styles["BodyText"]),
         Paragraph(f"Código: {escape(trip.codigo_acesso)} · Situação: {escape(trip.status)}", styles["BodyText"]),
@@ -62,7 +70,7 @@ def generate_expense_pdf(trip, leader, participants, rows):
         story.extend(Paragraph(escape(person.nome), styles["BodyText"]) for person in participants)
     else:
         story.append(Paragraph("Nenhum técnico participante.", styles["BodyText"]))
-    story.extend([Spacer(1, 14), Paragraph("Despesas dos técnicos", styles["Heading2"])])
+    story.extend([Spacer(1, 14), Paragraph("Despesas da viagem", styles["Heading2"])])
     total = Decimal("0.00")
     for expense, name in rows:
         total += expense.valor

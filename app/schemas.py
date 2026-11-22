@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Literal
 
@@ -57,7 +57,7 @@ class TripCreate(BaseModel):
     @model_validator(mode="after")
     def check_dates(self):
         if self.data_fim and self.data_fim < self.data_inicio:
-            raise ValueError("A data de término não pode ser anterior ao início")
+            raise ValueError("A data prevista de término não pode ser anterior ao início")
         return self
 
 
@@ -72,6 +72,14 @@ class TripPublic(BaseModel):
     descricao: str | None
     status: Literal["EM_ANDAMENTO", "ENCERRADA"]
     criado_em: datetime
+    encerrada_em: datetime | None = None
+
+    @field_validator("encerrada_em")
+    @classmethod
+    def normalize_closing_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
 
 
 class TripRead(TripPublic):
