@@ -35,6 +35,7 @@ class Trip(Base):
     descricao: Mapped[str | None] = mapped_column(Text)
     codigo_acesso: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="EM_ANDAMENTO")
+    encerrada_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

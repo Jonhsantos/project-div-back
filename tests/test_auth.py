@@ -1,5 +1,6 @@
 import os
 from decimal import Decimal
+from datetime import datetime, timezone
 from io import BytesIO
 from urllib.parse import quote
 
@@ -157,7 +158,7 @@ def test_expenses_require_receipt_and_permissions(client):
     assert http.post(url, headers=tech, data=data).status_code == 422
     assert http.post(url, headers=tech, data=data, files={"comprovante": ("fake.pdf", b"not pdf", "application/pdf")}).status_code == 422
     assert http.post(url, headers=tech, data={**data, "valor": "0"}, files=pdf).status_code == 422
-    assert http.post(url, headers=leader, data=data, files=pdf).status_code == 403
+    assert http.post(url, headers=outsider, data=data, files=pdf).status_code == 404
     assert http.post(url, headers=tech, data=data, files={"comprovante": ("big.pdf", b"%PDF-" + b"x" * (5 * 1024 * 1024), "application/pdf")}).status_code == 413
     result = http.post(url, headers=tech, data=data, files=pdf)
     assert result.status_code == 201
@@ -220,6 +221,99 @@ def test_expenses_require_receipt_and_permissions(client):
     assert http.post(f"/expenses/{third['id_despesa']}/review", headers=leader, json={"decisao": "CONFERIDA"}).status_code == 409
     assert http.put(f"/expenses/{third['id_despesa']}", headers=tech, data=data).status_code == 409
     assert http.delete(f"/expenses/{third['id_despesa']}", headers=tech).status_code == 409
+
+
+def test_leader_can_register_and_correct_own_expense(client):
+    http, _ = client
+
+    def token(email, role):
+        http.post("/auth/register", json={"nome": email, "email": email, "senha": "senha123", "perfil": role})
+        return {"Authorization": "Bearer " + http.post("/auth/login", json={"email": email, "senha": "senha123"}).json()["access_token"]}
+
+    leader = token("own-leader@example.com", "LIDER")
+    outsider = token("own-outsider@example.com", "LIDER")
+    tech = token("own-tech@example.com", "TECNICO")
+    trip = http.post("/trips", headers=leader, json={"titulo": "Viagem", "destino": "Santos", "data_inicio": "2026-11-20"}).json()
+    url = f"/trips/{trip['id_viagem']}/expenses"
+    data = {"descricao": "Despesa do líder", "valor": "12.50", "data_despesa": "2026-11-20", "categoria": "OUTROS"}
+    receipt = BytesIO()
+    page = canvas.Canvas(receipt)
+    page.drawString(50, 700, "Comprovante")
+    page.save()
+    pdf = {"comprovante": ("comprovante.pdf", receipt.getvalue(), "application/pdf")}
+    assert http.post(url, headers=leader, data=data).status_code == 422
+    assert http.post(url, headers=outsider, data=data, files=pdf).status_code == 404
+    assert http.post(url, headers=tech, data=data, files=pdf).status_code == 404
+    created = http.post(url, headers=leader, data=data, files=pdf)
+    assert created.status_code == 201
+    expense = created.json()
+    assert expense["status"] == "AGUARDANDO_CONFERENCIA"
+    assert http.get(url, headers=leader).json()[0]["id_usuario"] == expense["id_usuario"]
+    assert http.put(f"/expenses/{expense['id_despesa']}", headers=outsider, data=data).status_code == 404
+    assert http.put(f"/expenses/{expense['id_despesa']}", headers=leader, data={**data, "descricao": "Corrigida"}).status_code == 200
+    assert http.post(f"/trips/{trip['id_viagem']}/close", headers=leader).status_code == 409
+    assert http.post(f"/expenses/{expense['id_despesa']}/review", headers=leader, json={"decisao": "CONFERIDA"}).status_code == 200
+    assert http.post(f"/trips/{trip['id_viagem']}/close", headers=leader).status_code == 200
+    assert http.post(url, headers=leader, data=data, files=pdf).status_code == 409
+    assert http.get(f"/trips/{trip['id_viagem']}/export", headers=leader).status_code == 200
+
+
+def test_expense_dates_respect_trip_start_not_expected_end(client):
+    http, _ = client
+
+    def token(email, role):
+        http.post("/auth/register", json={"nome": email, "email": email, "senha": "senha123", "perfil": role})
+        return {"Authorization": "Bearer " + http.post("/auth/login", json={"email": email, "senha": "senha123"}).json()["access_token"]}
+
+    leader = token("dates-leader@example.com", "LIDER")
+    tech = token("dates-tech@example.com", "TECNICO")
+    trip = http.post("/trips", headers=leader, json={"titulo": "Datas", "destino": "Santos", "data_inicio": "2026-11-22", "data_fim": "2026-11-23"}).json()
+    assert http.post("/trips/join", headers=tech, json={"codigo_acesso": trip["codigo_acesso"]}).status_code == 201
+    url = f"/trips/{trip['id_viagem']}/expenses"
+    pdf = {"comprovante": ("comprovante.pdf", b"%PDF-test", "application/pdf")}
+    data = {"descricao": "Item", "valor": "10.00", "data_despesa": "2026-11-21", "categoria": "OUTROS"}
+    for user in (leader, tech):
+        rejected = http.post(url, headers=user, data=data, files=pdf)
+        assert rejected.status_code == 422
+        assert "anterior ao início" in rejected.json()["detail"]
+        created = http.post(url, headers=user, data={**data, "data_despesa": "2026-11-22"}, files=pdf)
+        assert created.status_code == 201
+        expense_url = f"/expenses/{created.json()['id_despesa']}"
+        assert http.put(expense_url, headers=user, data=data).status_code == 422
+        assert http.put(expense_url, headers=user, data={**data, "data_despesa": "2026-11-24"}).status_code == 200
+        assert http.post(url, headers=user, data={**data, "data_despesa": "2026-11-24"}, files=pdf).status_code == 201
+
+
+def test_report_uses_persisted_closing_time_brasilia_and_handles_legacy(client, monkeypatch):
+    import importlib
+    main = importlib.import_module("app.main")
+    http, sessions = client
+    http.post("/auth/register", json={"nome": "Líder", "email": "date-report@example.com", "senha": "senha123", "perfil": "LIDER"})
+    token = http.post("/auth/login", json={"email": "date-report@example.com", "senha": "senha123"}).json()["access_token"]
+    headers = {"Authorization": "Bearer " + token}
+    trip = http.post("/trips", headers=headers, json={"titulo": "Datas", "destino": "Santos", "data_inicio": "2026-11-20", "data_fim": "2026-12-01"}).json()
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 22, 1, 30, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(main, "datetime", FixedDateTime)
+    closed = http.post(f"/trips/{trip['id_viagem']}/close", headers=headers)
+    assert closed.status_code == 200
+    assert closed.json()["encerrada_em"].startswith("2026-11-22T01:30:00")
+    assert http.post(f"/trips/{trip['id_viagem']}/close", headers=headers).status_code == 409
+    for _ in range(2):
+        pdf = http.get(f"/trips/{trip['id_viagem']}/export", headers=headers)
+        text = "\n".join(page.extract_text() for page in PdfReader(BytesIO(pdf.content)).pages)
+        assert "Data prevista de término: 01/12/2026" in text
+        assert "Data de encerramento: 21/11/2026" in text
+    with sessions() as db:
+        db.get(Trip, trip["id_viagem"]).encerrada_em = None
+        db.commit()
+    pdf = http.get(f"/trips/{trip['id_viagem']}/export", headers=headers)
+    text = "\n".join(page.extract_text() for page in PdfReader(BytesIO(pdf.content)).pages)
+    assert "Data de encerramento: Não registrada" in text
 
 
 def test_expense_summary_is_scoped_and_updates(client):

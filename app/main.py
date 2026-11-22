@@ -136,6 +136,7 @@ def close_trip(trip_id: int, user: User = Depends(current_user), db: Session = D
     except ExportError as exc:
         raise HTTPException(status_code=409, detail=f"Não é possível encerrar: {exc}") from exc
     trip.status = "ENCERRADA"
+    trip.encerrada_em = datetime.now(timezone.utc)
     db.commit()
     db.refresh(trip)
     return trip
@@ -178,11 +179,11 @@ def create_expense(
     comprovante: Annotated[UploadFile, File()],
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ):
-    if user.perfil != "TECNICO":
-        raise HTTPException(status_code=403, detail="Apenas técnicos podem registrar despesas")
     trip = expense_access(trip_id, user, db, lock=True)
     if trip.status != "EM_ANDAMENTO":
         raise HTTPException(status_code=409, detail="Não é possível registrar despesas em viagem encerrada")
+    if data_despesa < trip.data_inicio:
+        raise HTTPException(status_code=422, detail="A data da despesa não pode ser anterior ao início da viagem")
     descricao = descricao.strip()
     if not descricao:
         raise HTTPException(status_code=422, detail="Informe a descrição")
@@ -205,11 +206,13 @@ def update_expense(
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ):
     expense = db.get(Expense, expense_id)
-    if not expense or user.perfil != "TECNICO" or expense.id_usuario != user.id_usuario:
+    if not expense or expense.id_usuario != user.id_usuario:
         raise HTTPException(status_code=404, detail="Despesa não encontrada")
     trip = expense_access(expense.id_viagem, user, db, lock=True)
     if trip.status != "EM_ANDAMENTO":
         raise HTTPException(status_code=409, detail="Edição indisponível para viagem encerrada")
+    if data_despesa < trip.data_inicio:
+        raise HTTPException(status_code=422, detail="A data da despesa não pode ser anterior ao início da viagem")
     expense = db.scalar(select(Expense).where(Expense.id_despesa == expense_id).with_for_update().execution_options(populate_existing=True))
     if not expense or expense.id_usuario != user.id_usuario:
         raise HTTPException(status_code=404, detail="Despesa não encontrada")
